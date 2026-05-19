@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ms-teams-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "Microsoft Teams & Outlook MCP Server"
 requires-python = ">=3.10"
 dependencies = [

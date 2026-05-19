@@ -1117,22 +1117,23 @@ def read_channel_file(drive_id: str, item_id: str) -> str:
 
 
 def _extract_hwp_text(data: bytes) -> str:
-    """Extract plain text from HWP 5 (Hancom) binary file bytes.
+    """Extract plain text + tables from HWP 5 (Hancom) binary file bytes.
 
-    Uses pyhwp's XSL-based text transform. Writes the bytes to a temp file
-    (Hwp5File needs a path), runs the transform, and returns the captured
-    text. Returns an error message string on failure so callers can render
-    it inline rather than raising.
+    Runs pyhwp's XSL HTML transform (which renders table cells, unlike the
+    plaintext transform), then walks the resulting XHTML with lxml to emit
+    paragraphs and markdown-style tables in document order. Falls back to
+    the plaintext transform if HTML/lxml fails.
     """
     import os
     import tempfile
     from contextlib import closing
     try:
         from hwp5.xmlmodel import Hwp5File
+        from hwp5.hwp5html import HTMLTransform
         from hwp5.hwp5txt import TextTransform
     except ImportError:
         return ("[HWP parser unavailable — install pyhwp to enable HWP "
-                "extraction (`pip install pyhwp six`).]")
+                "extraction (`pip install pyhwp six lxml`).]")
 
     tmp_path = None
     try:
@@ -1140,11 +1141,23 @@ def _extract_hwp_text(data: bytes) -> str:
             tmp.write(data)
             tmp_path = tmp.name
 
-        out_buf = io.BytesIO()
-        transform = TextTransform().transform_hwp5_to_text
+        # First try: HTMLTransform → XHTML → walk with lxml.
+        try:
+            html_buf = io.BytesIO()
+            html_transform = HTMLTransform().transform_hwp5_to_xhtml
+            with closing(Hwp5File(tmp_path)) as hwp:
+                html_transform(hwp, html_buf)
+            return _hwp_xhtml_to_markdown(html_buf.getvalue())
+        except Exception as e:
+            html_err = f"{type(e).__name__}: {e}"
+
+        # Fallback: plaintext transform (no table contents but still useful).
+        text_buf = io.BytesIO()
+        text_transform = TextTransform().transform_hwp5_to_text
         with closing(Hwp5File(tmp_path)) as hwp:
-            transform(hwp, out_buf)
-        return out_buf.getvalue().decode("utf-8", errors="replace")
+            text_transform(hwp, text_buf)
+        plain = text_buf.getvalue().decode("utf-8", errors="replace")
+        return f"[HWP table extraction unavailable ({html_err}); plaintext only.]\n\n{plain}"
     except Exception as e:
         return f"[HWP extraction failed: {type(e).__name__}: {e}]"
     finally:
@@ -1153,6 +1166,75 @@ def _extract_hwp_text(data: bytes) -> str:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _hwp_xhtml_to_markdown(xhtml: bytes) -> str:
+    """Convert pyhwp's XHTML output to a paragraph + markdown-table mix.
+
+    Walks <p> and <table> elements in document order. Paragraphs contribute
+    inline text; tables contribute pipe-delimited markdown with the first
+    row treated as a header.
+    """
+    from lxml import etree
+
+    parser = etree.HTMLParser(recover=True)
+    tree = etree.fromstring(xhtml, parser=parser)
+    if tree is None:
+        return ""
+
+    # XHTML uses a default namespace; HTMLParser strips it, so we can match
+    # bare tag names on the resulting tree.
+    body = tree.find(".//body")
+    root = body if body is not None else tree
+
+    out_lines: list[str] = []
+
+    def cell_text(cell) -> str:
+        # Collapse whitespace; join all descendant text with single spaces.
+        parts = [t for t in cell.itertext()]
+        text = " ".join(p.strip() for p in parts if p and p.strip())
+        # Markdown table cells: escape pipe and collapse newlines.
+        return text.replace("|", "\\|").replace("\n", " ").strip()
+
+    def render_table(table) -> None:
+        rows = table.findall(".//tr")
+        if not rows:
+            return
+        rendered_rows: list[list[str]] = []
+        max_cols = 0
+        for tr in rows:
+            cells = tr.findall("./td") + tr.findall("./th")
+            row = [cell_text(c) for c in cells]
+            if any(row):
+                rendered_rows.append(row)
+                max_cols = max(max_cols, len(row))
+        if not rendered_rows:
+            return
+        # Pad short rows so the markdown stays well-formed.
+        for r in rendered_rows:
+            while len(r) < max_cols:
+                r.append("")
+        header = rendered_rows[0]
+        out_lines.append("| " + " | ".join(header) + " |")
+        out_lines.append("|" + "|".join(["---"] * max_cols) + "|")
+        for r in rendered_rows[1:]:
+            out_lines.append("| " + " | ".join(r) + " |")
+        out_lines.append("")
+
+    def walk(node):
+        for child in node:
+            tag = (child.tag or "").lower()
+            if tag == "table":
+                render_table(child)
+            elif tag == "p":
+                text = " ".join(t.strip() for t in child.itertext() if t and t.strip())
+                if text:
+                    out_lines.append(text)
+            else:
+                walk(child)
+
+    walk(root)
+    return "\n".join(out_lines)
 
 # ═══════════════════════════════════════════
 # File Keyword Index
