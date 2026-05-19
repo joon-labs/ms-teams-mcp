@@ -1147,7 +1147,14 @@ def _extract_hwp_text(data: bytes) -> str:
             html_transform = HTMLTransform().transform_hwp5_to_xhtml
             with closing(Hwp5File(tmp_path)) as hwp:
                 html_transform(hwp, html_buf)
-            return _hwp_xhtml_to_markdown(html_buf.getvalue())
+            text_md = _hwp_xhtml_to_markdown(html_buf.getvalue())
+            # Also list embedded images (bindata) as a metadata footer so
+            # callers know what binary attachments live in the document
+            # without paying the token cost of inlining their base64.
+            img_summary = _hwp_image_summary(tmp_path)
+            if img_summary:
+                text_md = f"{text_md}\n\n{img_summary}"
+            return text_md
         except Exception as e:
             html_err = f"{type(e).__name__}: {e}"
 
@@ -1166,6 +1173,59 @@ def _extract_hwp_text(data: bytes) -> str:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _hwp_image_summary(hwp_path: str) -> str:
+    """Return a markdown summary of HWP-embedded images (filenames + sizes).
+
+    Uses pyhwp's HTMLTransform.extract_bindata_dir to materialize binary
+    attachments into a temp dir, then reports filenames + sizes + a
+    best-effort MIME guess. We do NOT embed image bytes themselves —
+    callers can request the raw HWP via a separate channel if needed.
+    """
+    import os
+    import tempfile
+    import mimetypes
+    from contextlib import closing
+    try:
+        from hwp5.xmlmodel import Hwp5File
+        from hwp5.hwp5html import HTMLTransform
+    except ImportError:
+        return ""
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        try:
+            with closing(Hwp5File(hwp_path)) as hwp:
+                HTMLTransform().extract_bindata_dir(hwp, out_dir)
+        except Exception:
+            return ""
+
+        rows = []
+        for root, _dirs, files in os.walk(out_dir):
+            for fname in sorted(files):
+                fpath = os.path.join(root, fname)
+                size = os.path.getsize(fpath)
+                mime, _ = mimetypes.guess_type(fname)
+                rows.append((fname, size, mime or "application/octet-stream"))
+
+        if not rows:
+            return ""
+
+        lines = ["## Embedded images / bindata",
+                 "",
+                 "| File | Size | MIME |",
+                 "|------|------|------|"]
+        for fname, size, mime in rows:
+            if size >= 1024 * 1024:
+                size_s = f"{size / 1024 / 1024:.1f} MB"
+            elif size >= 1024:
+                size_s = f"{size / 1024:.1f} KB"
+            else:
+                size_s = f"{size} B"
+            lines.append(f"| `{fname}` | {size_s} | {mime} |")
+        lines.append("")
+        lines.append("_Bytes not inlined; re-fetch the file directly if you need the image content._")
+        return "\n".join(lines)
 
 
 def _hwp_xhtml_to_markdown(xhtml: bytes) -> str:
