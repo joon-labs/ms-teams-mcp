@@ -1100,6 +1100,11 @@ def read_channel_file(drive_id: str, item_id: str) -> str:
         full = "\n".join(result_parts)
         return full[:8000]
 
+    # Handle HWP (Hancom) files via pyhwp's XSL text transform.
+    if name.endswith(".hwp"):
+        text = _extract_hwp_text(resp.content)
+        return f"Filename: {name}\n{'─'*50}\n{text[:8000]}"
+
     try:
         content = resp.content.decode("utf-8")
     except UnicodeDecodeError:
@@ -1109,6 +1114,45 @@ def read_channel_file(drive_id: str, item_id: str) -> str:
             return "Unable to determine file encoding. This may be a binary file."
 
     return f"Filename: {name}\n{'─'*50}\n{content[:5000]}"
+
+
+def _extract_hwp_text(data: bytes) -> str:
+    """Extract plain text from HWP 5 (Hancom) binary file bytes.
+
+    Uses pyhwp's XSL-based text transform. Writes the bytes to a temp file
+    (Hwp5File needs a path), runs the transform, and returns the captured
+    text. Returns an error message string on failure so callers can render
+    it inline rather than raising.
+    """
+    import os
+    import tempfile
+    from contextlib import closing
+    try:
+        from hwp5.xmlmodel import Hwp5File
+        from hwp5.hwp5txt import TextTransform
+    except ImportError:
+        return ("[HWP parser unavailable — install pyhwp to enable HWP "
+                "extraction (`pip install pyhwp six`).]")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+
+        out_buf = io.BytesIO()
+        transform = TextTransform().transform_hwp5_to_text
+        with closing(Hwp5File(tmp_path)) as hwp:
+            transform(hwp, out_buf)
+        return out_buf.getvalue().decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"[HWP extraction failed: {type(e).__name__}: {e}]"
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 # ═══════════════════════════════════════════
 # File Keyword Index
