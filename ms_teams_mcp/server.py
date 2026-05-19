@@ -32,6 +32,7 @@ SCOPES = [
     "ChannelMessage.Read.All", "ChannelMessage.Send",
     "Team.ReadBasic.All",
     "Files.Read.All",
+    "Sites.Read.All",
     "People.Read",
     "Calendars.ReadWrite",
 ]
