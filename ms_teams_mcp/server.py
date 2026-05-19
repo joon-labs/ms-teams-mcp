@@ -158,6 +158,12 @@ def graph_get(path: str, params: dict = None, url: str = None):
     _check_response(res)
     return res.json()
 
+def graph_get_binary(path: str) -> requests.Response:
+    """Graph API GET that returns the raw Response (for binary endpoints like /content)."""
+    url = f"https://graph.microsoft.com/v1.0{path}"
+    res = requests.get(url, headers={"Authorization": _headers()["Authorization"]}, allow_redirects=True)
+    return res
+
 def graph_post(path: str, body: dict):
     url = f"https://graph.microsoft.com/v1.0{path}"
     res = requests.post(url, headers=_headers(), json=body)
@@ -1066,10 +1072,14 @@ def read_channel_file(drive_id: str, item_id: str) -> str:
     if "image" in mime or "video" in mime or "audio" in mime:
         return f"Binary file ({mime}). Only text files can be read."
 
-    if not download_url:
-        return "Unable to retrieve download URL."
-
-    resp = requests.get(download_url)
+    if download_url:
+        resp = requests.get(download_url)
+    else:
+        # Fallback: SharePoint-backed channel files sometimes omit
+        # @microsoft.graph.downloadUrl from the metadata response. Pull
+        # content directly via the /content endpoint, which follows the
+        # platform's 302 redirect to the actual download URL.
+        resp = graph_get_binary(f"/drives/{drive_id}/items/{item_id}/content")
     _check_response(resp)
 
     # Handle xlsx files
@@ -1192,10 +1202,12 @@ def build_file_index() -> str:
                         params={"$select": "name,@microsoft.graph.downloadUrl"}
                     )
                     download_url = meta.get("@microsoft.graph.downloadUrl", "")
-                    if not download_url:
-                        continue
-
-                    resp = requests.get(download_url)
+                    if download_url:
+                        resp = requests.get(download_url)
+                    else:
+                        # SharePoint-backed channel files may omit downloadUrl;
+                        # /content endpoint follows the redirect to the file.
+                        resp = graph_get_binary(f"/drives/{drive_id}/items/{item_id}/content")
                     if not resp.ok:
                         continue
 
